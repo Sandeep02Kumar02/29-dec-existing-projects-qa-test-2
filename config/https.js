@@ -66,6 +66,106 @@ const SSL_CERT_PATH = process.env.SSL_CERT_PATH || path.resolve(process.cwd(), '
  */
 const HTTPS_PORT = parseInt(process.env.HTTPS_PORT, 10) || 3443;
 
+/**
+ * Whether HTTPS is enabled
+ * Configurable via HTTPS_ENABLED environment variable
+ * @type {boolean}
+ */
+const HTTPS_ENABLED = process.env.HTTPS_ENABLED !== 'false';
+
+/**
+ * Environment configuration object for HTTPS settings.
+ * Provides centralized access to HTTPS-related environment variables.
+ * 
+ * @type {Object}
+ * @property {number} HTTPS_PORT - HTTPS server port (default: 3443)
+ * @property {boolean} HTTPS_ENABLED - Whether HTTPS is enabled (default: true)
+ * @property {string} SSL_KEY_PATH - Path to SSL private key file
+ * @property {string} SSL_CERT_PATH - Path to SSL certificate file
+ * 
+ * @example
+ * const { env } = require('./config/https');
+ * console.log(`HTTPS port: ${env.HTTPS_PORT}`);
+ * console.log(`HTTPS enabled: ${env.HTTPS_ENABLED}`);
+ */
+const env = {
+  HTTPS_PORT,
+  HTTPS_ENABLED,
+  SSL_KEY_PATH,
+  SSL_CERT_PATH
+};
+
+// =============================================================================
+// UTILITY FUNCTIONS
+// =============================================================================
+
+/**
+ * Check if SSL certificates exist at the configured paths.
+ * 
+ * This function performs a synchronous check for the existence of both
+ * the SSL private key and certificate files at their configured locations.
+ * 
+ * @function certificatesExist
+ * @returns {boolean} True if both certificate files exist, false otherwise
+ * 
+ * @example
+ * const { certificatesExist } = require('./config/https');
+ * if (certificatesExist()) {
+ *   console.log('Certificates available, can start HTTPS server');
+ * } else {
+ *   console.log('Certificates not found, running HTTP only');
+ * }
+ * 
+ * @security
+ * - Only checks file existence, does not validate certificate content
+ * - Should be used before attempting to start HTTPS server
+ */
+function certificatesExist() {
+  return fs.existsSync(SSL_KEY_PATH) && fs.existsSync(SSL_CERT_PATH);
+}
+
+/**
+ * Create an HTTP to HTTPS redirect middleware.
+ * 
+ * This function creates an Express middleware that redirects all HTTP
+ * requests to HTTPS using the specified port. Used to enforce HTTPS
+ * by redirecting any HTTP traffic.
+ * 
+ * @function createHttpsRedirect
+ * @param {number} [httpsPort=3443] - The HTTPS port to redirect to
+ * @returns {Function} Express middleware function for redirecting to HTTPS
+ * 
+ * @example
+ * const express = require('express');
+ * const { createHttpsRedirect } = require('./config/https');
+ * 
+ * const httpApp = express();
+ * httpApp.use(createHttpsRedirect(3443));
+ * httpApp.listen(3000); // All HTTP requests redirect to https://...:3443
+ * 
+ * @security
+ * - Uses 301 (permanent) redirect for SEO and caching benefits
+ * - Preserves the original request path and query string
+ * - Essential for enforcing HTTPS in production
+ */
+function createHttpsRedirect(httpsPort = HTTPS_PORT) {
+  return function redirectToHttps(req, res, next) {
+    // Skip redirect if already on HTTPS
+    if (req.secure || req.headers['x-forwarded-proto'] === 'https') {
+      return next();
+    }
+
+    // Build the HTTPS URL
+    const host = req.hostname;
+    const port = httpsPort !== 443 ? `:${httpsPort}` : '';
+    const httpsUrl = `https://${host}${port}${req.originalUrl}`;
+
+    // Redirect to HTTPS with 301 (permanent redirect)
+    console.log(`[HTTPS Redirect] Redirecting HTTP request to: ${httpsUrl}`);
+    return res.redirect(301, httpsUrl);
+  };
+}
+
 // =============================================================================
 // CERTIFICATE LOADING
 // =============================================================================
@@ -295,6 +395,9 @@ function createSecureServer(app) {
  * @exports httpsOptions - TLS configuration object with key, cert, and minVersion
  * @exports createSecureServer - Function to create HTTPS server with Express app
  * @exports loadCertificates - Function to load SSL certificates from disk
+ * @exports certificatesExist - Function to check if SSL certificates exist
+ * @exports createHttpsRedirect - Function to create HTTP to HTTPS redirect middleware
+ * @exports env - Environment configuration object for HTTPS settings
  */
 module.exports = {
   /**
@@ -314,5 +417,23 @@ module.exports = {
    * Load SSL certificates from configured paths
    * @type {Function}
    */
-  loadCertificates
+  loadCertificates,
+
+  /**
+   * Check if SSL certificates exist at configured paths
+   * @type {Function}
+   */
+  certificatesExist,
+
+  /**
+   * Create HTTP to HTTPS redirect middleware
+   * @type {Function}
+   */
+  createHttpsRedirect,
+
+  /**
+   * Environment configuration object for HTTPS settings
+   * @type {Object}
+   */
+  env
 };
