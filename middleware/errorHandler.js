@@ -1,18 +1,31 @@
 /**
- * @fileoverview Centralized Error Handling Middleware
+ * @fileoverview Centralized Express Error Handling Middleware
  * 
- * This module provides centralized error handling for the Express application.
- * It handles various error types including validation errors, rate limit errors,
- * and security-related errors with consistent response formatting.
+ * This module provides centralized error handling for the Express application,
+ * specifically designed for security-related errors including:
+ * - Rate limit exceeded (429)
+ * - Validation errors (400)
+ * - Authentication/Authorization errors (401/403)
+ * - General server errors (500)
  * 
  * Features:
- * - Standardized error response format
- * - Environment-aware error details
- * - Logging for monitoring and debugging
- * - Specific handling for security errors
+ * - Consistent JSON error response format: { success: boolean, error: string, ... }
+ * - Environment-aware error details (hides sensitive info in production)
+ * - Comprehensive error logging for monitoring
+ * - Prevents leaking sensitive error information in production
  * 
  * @module middleware/errorHandler
  * @version 1.0.0
+ * 
+ * @example
+ * // Usage in Express app - MUST be registered LAST after all routes
+ * const errorHandler = require('./middleware/errorHandler');
+ * 
+ * // Register all your routes first
+ * app.use('/api', routes);
+ * 
+ * // Then register error handler as the LAST middleware
+ * app.use(errorHandler); // Must be last middleware
  */
 
 'use strict';
@@ -22,167 +35,333 @@
 // =============================================================================
 
 /**
- * Current environment mode
+ * Current environment mode - defaults to 'development' if not set
  * @type {string}
  */
 const NODE_ENV = process.env.NODE_ENV || 'development';
 
 /**
- * Whether running in production
+ * Whether the application is running in production mode
+ * Used to determine level of error detail exposure
  * @type {boolean}
  */
 const isProduction = NODE_ENV === 'production';
 
 // =============================================================================
-// ERROR RESPONSE FORMATTING
+// LOGGING UTILITIES
 // =============================================================================
 
 /**
- * Format error response based on error type and environment.
+ * Log error details to console for monitoring and debugging.
+ * Includes timestamp, request path, error message, and optionally stack trace.
  * 
- * @param {Error} error - The error object
- * @param {boolean} includeStack - Whether to include stack trace
- * @returns {Object} Formatted error response
+ * @param {Error} err - The error object
+ * @param {Object} req - Express request object
+ * @returns {void}
  */
-const formatErrorResponse = (error, includeStack = false) => {
-  const response = {
-    error: error.name || 'Error',
-    message: error.message || 'An unexpected error occurred',
-    status: error.status || error.statusCode || 500,
+const logError = (err, req) => {
+  const timestamp = new Date().toISOString();
+  const requestPath = req.originalUrl || req.path || 'unknown';
+  const method = req.method || 'UNKNOWN';
+  const ip = req.ip || req.connection?.remoteAddress || 'unknown';
+  const errorMessage = err.message || 'Unknown error';
+  const statusCode = err.status || err.statusCode || 500;
+
+  // Build log entry
+  const logEntry = {
+    timestamp,
+    level: statusCode >= 500 ? 'ERROR' : 'WARN',
+    method,
+    path: requestPath,
+    ip,
+    statusCode,
+    error: errorMessage
   };
 
-  // Add error code if available
-  if (error.code) {
-    response.code = error.code;
+  // Include stack trace in development mode only
+  if (!isProduction && err.stack) {
+    logEntry.stack = err.stack;
   }
 
-  // Add validation details if available
-  if (error.details) {
-    response.details = error.details;
+  // Log to console.error for all errors (enables proper log level filtering)
+  console.error(`[${logEntry.level}] ${timestamp} - ${method} ${requestPath} - Status: ${statusCode} - ${errorMessage}`);
+  
+  // In development, also log the full details
+  if (!isProduction) {
+    console.error('Error details:', JSON.stringify(logEntry, null, 2));
   }
-
-  // Add stack trace in development
-  if (includeStack && error.stack) {
-    response.stack = error.stack.split('\n').map(line => line.trim());
-  }
-
-  return response;
 };
 
 // =============================================================================
-// ERROR TYPE HANDLERS
+// ERROR TYPE DETECTION UTILITIES
 // =============================================================================
 
 /**
- * Handle CORS errors
+ * Check if error is a rate limit error from express-rate-limit
  * 
- * @param {Error} error - CORS error
- * @param {Object} res - Express response object
+ * @param {Error} err - The error object
+ * @returns {boolean} True if this is a rate limit error
  */
-const handleCorsError = (error, res) => {
-  console.warn('[CORS_ERROR]', error.message);
-  
-  res.status(403).json({
-    error: 'CORS Error',
-    message: 'Cross-origin request blocked by CORS policy',
-    code: 'CORS_BLOCKED',
-  });
+const isRateLimitError = (err) => {
+  // express-rate-limit sets status to 429
+  if (err.status === 429 || err.statusCode === 429) {
+    return true;
+  }
+  // Check for rateLimit property added by express-rate-limit
+  if (err.rateLimit !== undefined) {
+    return true;
+  }
+  // Check for specific error code
+  if (err.code === 'RATE_LIMIT_EXCEEDED' || err.code === 'TOO_MANY_REQUESTS') {
+    return true;
+  }
+  // Check error message
+  if (err.message && err.message.toLowerCase().includes('too many requests')) {
+    return true;
+  }
+  return false;
 };
 
 /**
- * Handle rate limit errors
+ * Check if error is a validation error from express-validator
  * 
- * @param {Error} error - Rate limit error
- * @param {Object} res - Express response object
+ * @param {Error} err - The error object
+ * @returns {boolean} True if this is a validation error
  */
-const handleRateLimitError = (error, res) => {
-  console.warn('[RATE_LIMIT_ERROR]', error.message);
-  
-  res.status(429).json({
-    error: 'Too Many Requests',
-    message: 'You have exceeded the rate limit. Please try again later.',
-    code: 'RATE_LIMIT_EXCEEDED',
-    retryAfter: error.retryAfter || 'See Retry-After header',
-  });
+const isValidationError = (err) => {
+  // Check for ValidationError name
+  if (err.name === 'ValidationError') {
+    return true;
+  }
+  // Check for validation-related status codes
+  if ((err.status === 400 || err.statusCode === 400) && err.errors) {
+    return true;
+  }
+  // Check for express-validator specific properties
+  if (Array.isArray(err.errors) && err.errors.length > 0) {
+    // Check if errors look like express-validator format
+    const firstError = err.errors[0];
+    if (firstError && (firstError.param !== undefined || firstError.path !== undefined || firstError.msg !== undefined)) {
+      return true;
+    }
+  }
+  // Check for validation error code
+  if (err.code === 'VALIDATION_ERROR' || err.code === 'VALIDATION_FAILED') {
+    return true;
+  }
+  return false;
 };
 
 /**
- * Handle validation errors
+ * Check if error is an authentication error (401)
  * 
- * @param {Error} error - Validation error
- * @param {Object} res - Express response object
+ * @param {Error} err - The error object
+ * @returns {boolean} True if this is an authentication error
  */
-const handleValidationError = (error, res) => {
-  console.info('[VALIDATION_ERROR]', error.message);
-  
-  res.status(400).json({
-    error: 'Validation Error',
-    message: error.message || 'The request contains invalid data',
-    code: 'VALIDATION_FAILED',
-    details: error.details || [],
-  });
+const isAuthenticationError = (err) => {
+  if (err.status === 401 || err.statusCode === 401) {
+    return true;
+  }
+  if (err.code === 'UNAUTHORIZED' || err.code === 'AUTH_REQUIRED' || err.code === 'AUTHENTICATION_FAILED') {
+    return true;
+  }
+  if (err.name === 'UnauthorizedError' || err.name === 'AuthenticationError') {
+    return true;
+  }
+  return false;
 };
 
 /**
- * Handle syntax/JSON parsing errors
+ * Check if error is an authorization/forbidden error (403)
  * 
- * @param {Error} error - Syntax error
- * @param {Object} res - Express response object
+ * @param {Error} err - The error object
+ * @returns {boolean} True if this is an authorization error
  */
-const handleSyntaxError = (error, res) => {
-  console.warn('[SYNTAX_ERROR]', error.message);
-  
-  res.status(400).json({
-    error: 'Bad Request',
-    message: 'Invalid JSON syntax in request body',
-    code: 'INVALID_JSON',
-  });
+const isAuthorizationError = (err) => {
+  if (err.status === 403 || err.statusCode === 403) {
+    return true;
+  }
+  if (err.code === 'FORBIDDEN' || err.code === 'ACCESS_DENIED' || err.code === 'AUTHORIZATION_FAILED') {
+    return true;
+  }
+  if (err.name === 'ForbiddenError' || err.name === 'AuthorizationError') {
+    return true;
+  }
+  return false;
 };
 
 /**
- * Handle authentication errors
+ * Check if error is a JSON syntax error (malformed request body)
  * 
- * @param {Error} error - Authentication error
- * @param {Object} res - Express response object
+ * @param {Error} err - The error object
+ * @returns {boolean} True if this is a JSON syntax error
  */
-const handleAuthError = (error, res) => {
-  console.warn('[AUTH_ERROR]', error.message);
+const isSyntaxError = (err) => {
+  return err instanceof SyntaxError && err.status === 400 && 'body' in err;
+};
+
+// =============================================================================
+// ERROR RESPONSE HANDLERS
+// =============================================================================
+
+/**
+ * Handle rate limit exceeded errors (429 Too Many Requests)
+ * 
+ * @param {Error} err - The error object
+ * @param {Object} res - Express response object
+ * @returns {void}
+ */
+const handleRateLimitError = (err, res) => {
+  // Calculate retry after seconds if available
+  let retryAfter = null;
   
-  res.status(401).json({
-    error: 'Unauthorized',
-    message: error.message || 'Authentication required',
-    code: 'AUTH_REQUIRED',
-  });
+  if (err.retryAfter) {
+    retryAfter = err.retryAfter;
+  } else if (err.rateLimit && err.rateLimit.resetTime) {
+    retryAfter = Math.ceil((err.rateLimit.resetTime - Date.now()) / 1000);
+  } else if (res.getHeader('Retry-After')) {
+    retryAfter = parseInt(res.getHeader('Retry-After'), 10);
+  }
+
+  // Ensure Retry-After header is set
+  if (retryAfter && retryAfter > 0) {
+    res.set('Retry-After', String(retryAfter));
+  }
+
+  const response = {
+    success: false,
+    error: 'Too many requests',
+    message: 'You have exceeded the rate limit. Please try again later.'
+  };
+
+  if (retryAfter && retryAfter > 0) {
+    response.retryAfter = retryAfter;
+  }
+
+  res.status(429).json(response);
 };
 
 /**
- * Handle authorization/forbidden errors
+ * Handle validation errors (400 Bad Request)
  * 
- * @param {Error} error - Authorization error
+ * @param {Error} err - The error object
  * @param {Object} res - Express response object
+ * @returns {void}
  */
-const handleForbiddenError = (error, res) => {
-  console.warn('[FORBIDDEN_ERROR]', error.message);
-  
-  res.status(403).json({
-    error: 'Forbidden',
-    message: error.message || 'You do not have permission to access this resource',
-    code: 'ACCESS_DENIED',
-  });
+const handleValidationError = (err, res) => {
+  // Format validation errors for response
+  let details = [];
+
+  if (Array.isArray(err.errors)) {
+    details = err.errors.map(error => ({
+      field: error.path || error.param || error.field || 'unknown',
+      message: error.msg || error.message || 'Invalid value',
+      value: isProduction ? undefined : error.value
+    }));
+  } else if (err.details) {
+    details = err.details;
+  }
+
+  const response = {
+    success: false,
+    error: 'Validation failed',
+    message: err.message || 'The request contains invalid data'
+  };
+
+  // Only include details array if there are validation errors
+  if (details.length > 0) {
+    response.details = details;
+  }
+
+  res.status(400).json(response);
 };
 
 /**
- * Handle not found errors
+ * Handle authentication errors (401 Unauthorized)
  * 
- * @param {Error} error - Not found error
+ * @param {Error} err - The error object
  * @param {Object} res - Express response object
+ * @returns {void}
  */
-const handleNotFoundError = (error, res) => {
-  res.status(404).json({
-    error: 'Not Found',
-    message: error.message || 'The requested resource was not found',
-    code: 'NOT_FOUND',
-  });
+const handleAuthenticationError = (err, res) => {
+  // In production, do NOT expose detailed security error information
+  const response = {
+    success: false,
+    error: 'Access denied',
+    message: isProduction ? 'Authentication required' : (err.message || 'Authentication required')
+  };
+
+  res.status(401).json(response);
+};
+
+/**
+ * Handle authorization errors (403 Forbidden)
+ * 
+ * @param {Error} err - The error object
+ * @param {Object} res - Express response object
+ * @returns {void}
+ */
+const handleAuthorizationError = (err, res) => {
+  // In production, do NOT expose detailed security error information
+  const response = {
+    success: false,
+    error: 'Access denied',
+    message: isProduction ? 'You do not have permission to access this resource' : (err.message || 'Access denied')
+  };
+
+  res.status(403).json(response);
+};
+
+/**
+ * Handle JSON syntax errors (400 Bad Request)
+ * 
+ * @param {Error} err - The error object
+ * @param {Object} res - Express response object
+ * @returns {void}
+ */
+const handleSyntaxError = (err, res) => {
+  const response = {
+    success: false,
+    error: 'Invalid JSON',
+    message: 'The request body contains invalid JSON syntax'
+  };
+
+  // In development, include more details about the syntax error
+  if (!isProduction && err.message) {
+    response.details = err.message;
+  }
+
+  res.status(400).json(response);
+};
+
+/**
+ * Handle server errors (500 Internal Server Error)
+ * 
+ * @param {Error} err - The error object
+ * @param {Object} res - Express response object
+ * @returns {void}
+ */
+const handleServerError = (err, res) => {
+  const response = {
+    success: false,
+    error: 'Internal server error'
+  };
+
+  // In production: Hide stack traces and detailed error messages
+  // In development: Include stack trace and detailed information for debugging
+  if (isProduction) {
+    response.message = 'An unexpected error occurred. Please try again later.';
+  } else {
+    response.message = err.message || 'An unexpected error occurred';
+    if (err.stack) {
+      response.stack = err.stack.split('\n').map(line => line.trim());
+    }
+    if (err.code) {
+      response.code = err.code;
+    }
+  }
+
+  res.status(500).json(response);
 };
 
 // =============================================================================
@@ -190,158 +369,121 @@ const handleNotFoundError = (error, res) => {
 // =============================================================================
 
 /**
- * Centralized error handling middleware.
- * Catches all errors and returns standardized responses.
+ * Centralized Express error handling middleware.
  * 
- * @param {Error} error - The error object
+ * Handles various error types and returns standardized JSON responses.
+ * Must be registered AFTER all routes in the Express application.
+ * 
+ * Error Types Handled:
+ * - Rate Limit Errors (429): When express-rate-limit threshold is exceeded
+ * - Validation Errors (400): From express-validator or custom validation
+ * - Authentication Errors (401): When authentication is required but missing/invalid
+ * - Authorization Errors (403): When user lacks permission
+ * - Syntax Errors (400): Malformed JSON in request body
+ * - Server Errors (500): All other unhandled errors
+ * 
+ * Response Format:
+ * {
+ *   success: false,
+ *   error: string,        // Brief error description
+ *   message: string,      // Detailed message (limited in production)
+ *   details?: any,        // Additional details (validation errors, etc.)
+ *   retryAfter?: number,  // Seconds until rate limit resets (for 429)
+ *   stack?: string[]      // Stack trace (development only)
+ * }
+ * 
+ * @param {Error} err - The error object passed from previous middleware/route
  * @param {Object} req - Express request object
  * @param {Object} res - Express response object
  * @param {Function} next - Express next middleware function
  * @returns {void}
  * 
  * @example
- * // Use as the last middleware in the chain
- * app.use(errorHandler);
+ * // Register as the LAST middleware in your Express app
+ * const express = require('express');
+ * const errorHandler = require('./middleware/errorHandler');
+ * 
+ * const app = express();
+ * 
+ * // Your middleware and routes
+ * app.use(express.json());
+ * app.use('/api', apiRoutes);
+ * 
+ * // Error handler MUST be last
+ * app.use(errorHandler); // Must be last middleware
  */
-const errorHandler = (error, req, res, next) => {
-  // Log error for monitoring
-  const logData = {
-    timestamp: new Date().toISOString(),
-    method: req.method,
-    path: req.path,
-    ip: req.ip || req.connection.remoteAddress,
-    error: error.message,
-    stack: isProduction ? undefined : error.stack,
-  };
-  
-  console.error('[ERROR]', JSON.stringify(logData));
+const errorHandler = (err, req, res, next) => {
+  // Log all errors for monitoring purposes
+  logError(err, req);
 
-  // If headers already sent, delegate to default handler
+  // If response headers have already been sent, delegate to Express default handler
+  // This prevents attempting to send a response twice
   if (res.headersSent) {
-    return next(error);
+    return next(err);
   }
 
-  // Handle specific error types
-  if (error.message && error.message.includes('CORS')) {
-    return handleCorsError(error, res);
+  // Set JSON content type for all error responses
+  res.setHeader('Content-Type', 'application/json');
+
+  // Handle specific error types in order of specificity
+
+  // 1. Rate Limit Errors (429 Too Many Requests)
+  if (isRateLimitError(err)) {
+    return handleRateLimitError(err, res);
   }
 
-  if (error.status === 429 || error.code === 'RATE_LIMIT_EXCEEDED') {
-    return handleRateLimitError(error, res);
+  // 2. Validation Errors (400 Bad Request)
+  if (isValidationError(err)) {
+    return handleValidationError(err, res);
   }
 
-  if (error.name === 'ValidationError' || error.code === 'VALIDATION_FAILED') {
-    return handleValidationError(error, res);
+  // 3. JSON Syntax Errors (400 Bad Request)
+  if (isSyntaxError(err)) {
+    return handleSyntaxError(err, res);
   }
 
-  if (error instanceof SyntaxError && error.status === 400) {
-    return handleSyntaxError(error, res);
+  // 4. Authentication Errors (401 Unauthorized)
+  if (isAuthenticationError(err)) {
+    return handleAuthenticationError(err, res);
   }
 
-  if (error.status === 401 || error.code === 'AUTH_REQUIRED') {
-    return handleAuthError(error, res);
+  // 5. Authorization Errors (403 Forbidden)
+  if (isAuthorizationError(err)) {
+    return handleAuthorizationError(err, res);
   }
 
-  if (error.status === 403 || error.code === 'FORBIDDEN') {
-    return handleForbiddenError(error, res);
+  // 6. Handle errors with explicit status codes
+  const statusCode = err.status || err.statusCode || 500;
+
+  // 6a. Client errors (4xx) - pass through with appropriate response
+  if (statusCode >= 400 && statusCode < 500) {
+    const response = {
+      success: false,
+      error: err.name || 'Client Error',
+      message: err.message || 'A client error occurred'
+    };
+
+    // In production, sanitize certain messages
+    if (isProduction && statusCode === 400) {
+      response.message = 'Bad request';
+    }
+
+    return res.status(statusCode).json(response);
   }
 
-  if (error.status === 404 || error.code === 'NOT_FOUND') {
-    return handleNotFoundError(error, res);
-  }
-
-  // Default error response
-  const status = error.status || error.statusCode || 500;
-  const response = formatErrorResponse(error, !isProduction);
-
-  // Don't expose internal error details in production
-  if (isProduction && status >= 500) {
-    response.message = 'An internal server error occurred';
-    delete response.stack;
-    delete response.details;
-  }
-
-  res.status(status).json(response);
+  // 6b. Server errors (5xx) - treat as internal server error
+  return handleServerError(err, res);
 };
 
 // =============================================================================
-// 404 NOT FOUND HANDLER
+// MODULE EXPORT
 // =============================================================================
 
 /**
- * Handle 404 Not Found for unmatched routes.
- * Use before the error handler middleware.
+ * Export errorHandler as default export.
  * 
- * @param {Object} req - Express request object
- * @param {Object} res - Express response object
- * @param {Function} next - Express next middleware function
- * @returns {void}
+ * Usage: app.use(errorHandler) // Must be last middleware
  * 
- * @example
- * // Use before error handler
- * app.use(notFoundHandler);
- * app.use(errorHandler);
+ * @type {Function}
  */
-const notFoundHandler = (req, res, next) => {
-  res.status(404).json({
-    error: 'Not Found',
-    message: `Route ${req.method} ${req.path} not found`,
-    code: 'ROUTE_NOT_FOUND',
-  });
-};
-
-// =============================================================================
-// ASYNC ERROR WRAPPER
-// =============================================================================
-
-/**
- * Wrap async route handlers to catch errors automatically.
- * 
- * @param {Function} fn - Async route handler function
- * @returns {Function} Wrapped middleware function
- * 
- * @example
- * router.get('/users', asyncHandler(async (req, res) => {
- *   const users = await User.findAll();
- *   res.json(users);
- * }));
- */
-const asyncHandler = (fn) => {
-  return (req, res, next) => {
-    Promise.resolve(fn(req, res, next)).catch(next);
-  };
-};
-
-// =============================================================================
-// MODULE EXPORTS
-// =============================================================================
-
-module.exports = {
-  /**
-   * Main error handler middleware
-   */
-  errorHandler,
-
-  /**
-   * 404 Not Found handler
-   */
-  notFoundHandler,
-
-  /**
-   * Async handler wrapper
-   */
-  asyncHandler,
-
-  /**
-   * Format error response
-   */
-  formatErrorResponse,
-
-  /**
-   * Environment info
-   */
-  env: {
-    NODE_ENV,
-    isProduction,
-  },
-};
+module.exports = errorHandler;
