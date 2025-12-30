@@ -38,7 +38,7 @@ const { helmetConfig, corsConfig, rateLimitConfig, getSecuritySummary } = requir
 const { createSecureServer, createHttpsRedirect, certificatesExist, env: httpsEnv } = require('./config/https');
 
 // Middleware
-const { validateRequest, validationSchemas, sanitizeBody } = require('./middleware/validation');
+const { validateRequest, validationSchemas } = require('./middleware/validation');
 const { errorHandler, notFoundHandler, asyncHandler } = require('./middleware/errorHandler');
 
 // =============================================================================
@@ -121,10 +121,10 @@ app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true, limit: '10kb' }));
 
 /**
- * 5. Body Sanitization
- * Trims whitespace from string fields
+ * Note: Body sanitization is applied per-route using validationSchemas.sanitizeBody
+ * This allows for more granular control over which routes need sanitization.
+ * Example: app.post('/route', ...validationSchemas.sanitizeBody, validateRequest, handler)
  */
-app.use(sanitizeBody());
 
 // =============================================================================
 // ROUTES
@@ -183,7 +183,7 @@ if (NODE_ENV !== 'production') {
  * @returns {Object} Echoed request body
  */
 app.post('/echo',
-  validationSchemas.jsonBody,
+  validationSchemas.validateJson,
   validateRequest,
   (req, res) => {
     res.json({
