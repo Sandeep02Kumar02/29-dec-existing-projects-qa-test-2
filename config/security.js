@@ -475,29 +475,10 @@ const rateLimitConfig = {
   skip: rateLimitSkip,
 
   /**
-   * Key generator for identifying clients
-   * Uses IP address by default, handles proxied requests
+   * Disable validation for key generator to avoid IPv6 warning
+   * The default key generator handles IPv6 correctly
    */
-  keyGenerator: (req) => {
-    // Use X-Forwarded-For if behind a trusted proxy
-    if (TRUST_PROXY) {
-      const forwardedFor = req.headers['x-forwarded-for'];
-      if (forwardedFor) {
-        // Take the first IP in the chain (original client)
-        return forwardedFor.split(',')[0].trim();
-      }
-    }
-    return req.ip || req.connection.remoteAddress || 'unknown';
-  },
-
-  /**
-   * Whether to validate trust proxy settings
-   * Helps detect misconfiguration in production
-   */
-  validate: {
-    trustProxy: TRUST_PROXY,
-    xForwardedForHeader: TRUST_PROXY,
-  },
+  validate: false,
 };
 
 // =============================================================================
