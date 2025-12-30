@@ -476,14 +476,91 @@ const errorHandler = (err, req, res, next) => {
 };
 
 // =============================================================================
-// MODULE EXPORT
+// NOT FOUND HANDLER
 // =============================================================================
 
 /**
- * Export errorHandler as default export.
+ * 404 Not Found handler middleware.
  * 
- * Usage: app.use(errorHandler) // Must be last middleware
+ * Should be registered AFTER all routes but BEFORE errorHandler.
+ * Catches requests that don't match any defined routes.
  * 
- * @type {Function}
+ * @param {Object} req - Express request object
+ * @param {Object} res - Express response object
+ * @param {Function} next - Express next middleware function
+ * @returns {void}
+ * 
+ * @example
+ * // Register after all routes
+ * app.use('/api', routes);
+ * app.use(notFoundHandler); // Catches unmatched routes
+ * app.use(errorHandler);    // Must be last
  */
-module.exports = errorHandler;
+const notFoundHandler = (req, res, next) => {
+  const response = {
+    success: false,
+    error: 'Not Found',
+    message: `The requested resource '${req.originalUrl}' was not found on this server`,
+    method: req.method,
+    path: req.originalUrl
+  };
+
+  // In production, don't expose path details
+  if (isProduction) {
+    delete response.path;
+    response.message = 'The requested resource was not found';
+  }
+
+  res.status(404).json(response);
+};
+
+// =============================================================================
+// ASYNC HANDLER UTILITY
+// =============================================================================
+
+/**
+ * Async handler wrapper for Express route handlers.
+ * 
+ * Wraps async route handlers to automatically catch promise rejections
+ * and forward them to the error handler middleware.
+ * 
+ * @param {Function} fn - Async route handler function
+ * @returns {Function} Wrapped middleware function
+ * 
+ * @example
+ * // Wrap async route handlers
+ * app.get('/users', asyncHandler(async (req, res) => {
+ *   const users = await User.find();
+ *   res.json(users);
+ * }));
+ * 
+ * // Errors are automatically caught and passed to errorHandler
+ */
+const asyncHandler = (fn) => {
+  return (req, res, next) => {
+    Promise.resolve(fn(req, res, next)).catch(next);
+  };
+};
+
+// =============================================================================
+// MODULE EXPORTS
+// =============================================================================
+
+/**
+ * Export error handling utilities.
+ * 
+ * Usage:
+ * - const { errorHandler, notFoundHandler, asyncHandler } = require('./middleware/errorHandler');
+ * - app.use(notFoundHandler);  // After routes
+ * - app.use(errorHandler);     // Must be last middleware
+ * 
+ * @exports {Object} Error handling utilities
+ * @property {Function} errorHandler - Centralized error handler (must be last)
+ * @property {Function} notFoundHandler - 404 handler (before errorHandler)
+ * @property {Function} asyncHandler - Async wrapper for route handlers
+ */
+module.exports = {
+  errorHandler,
+  notFoundHandler,
+  asyncHandler
+};
