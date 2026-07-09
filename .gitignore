@@ -1,24 +1,9 @@
 # Dependencies
 node_modules/
 
-# Environment variables (local overrides; commit .env.example instead)
+# Environment variables (local secrets)
 .env
-.env.local
-.env.*.local
 
-# Logs
+# Logs (winston / PM2 runtime output)
 logs/
 *.log
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-
-# PM2 runtime
-.pm2/
-pids/
-*.pid
-*.seed
-
-# OS / editor cruft
-.DS_Store
-Thumbs.db
