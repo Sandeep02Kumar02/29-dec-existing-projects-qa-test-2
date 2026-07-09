@@ -11,11 +11,14 @@ module.exports = (err, req, res, next) => {
     ? http.STATUS_CODES[status] || 'Error'
     : 'Internal Server Error';
 
+  const detail = status < 500 ? clientMessage : redactQuery(err.message);
+
   logger.error(clientMessage, {
     status,
     method: req.method,
     url: redactQuery(req.originalUrl),
-    detail: redactQuery(err.message),
+    detail,
+    ...(err.type ? { type: err.type } : {}),
     ...(status >= 500 ? { stack: redactQuery(err.stack) } : {})
   });
 
