@@ -1,14 +1,22 @@
 const http = require('http');
 
-const hostname = '127.0.0.1';
-const port = 3000;
+const config = require('./src/config');
+const app = require('./src/app');
+const logger = require('./src/config/logger');
 
-const server = http.createServer((req, res) => {
-  res.statusCode = 200;
-  res.setHeader('Content-Type', 'text/plain');
-  res.end('Hello, World!\n');
+const server = http.createServer(app);
+
+server.listen(config.PORT, config.HOST, () => {
+  logger.info(`Server running at http://${config.HOST}:${config.PORT}/`);
 });
 
-server.listen(port, hostname, () => {
-  console.log(`Server running at http://${hostname}:${port}/`);
-});
+const shutdown = (signal) => {
+  logger.info(`${signal} received: closing HTTP server`);
+  server.close(() => {
+    logger.info('HTTP server closed');
+    process.exit(0);
+  });
+};
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
