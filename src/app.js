@@ -14,6 +14,7 @@ app.use(helmet());
 app.use(compression());
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
+morgan.token('url', (req) => (req.originalUrl || req.url || '').split('?')[0]);
 app.use(morgan('combined', { stream: logger.stream }));
 
 app.use('/', routes);
