@@ -6,7 +6,9 @@ const redactQuery = (value) =>
   typeof value === 'string' ? value.replace(/\?[^\s]*/g, '') : value;
 
 module.exports = (err, req, res, next) => {
-  const status = err.status || 500;
+  const status = Number.isInteger(err.status) && err.status >= 400 && err.status <= 599
+    ? err.status
+    : 500;
   const clientMessage = status < 500
     ? http.STATUS_CODES[status] || 'Error'
     : 'Internal Server Error';
@@ -21,6 +23,11 @@ module.exports = (err, req, res, next) => {
     ...(err.type ? { type: err.type } : {}),
     ...(status >= 500 ? { stack: redactQuery(err.stack) } : {})
   });
+
+  if (res.headersSent) {
+    req.socket.destroy();
+    return;
+  }
 
   res.status(status).json({ error: clientMessage });
 };
