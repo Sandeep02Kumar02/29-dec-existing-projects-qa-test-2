@@ -88,7 +88,7 @@ The JSON and URL-encoded body parsers run before routing, so their `400`, `413` 
 
 ## Logging
 
-The application logs through Winston, one JSON object per line, with `level`, `message`, `timestamp`, and any request metadata as fields. Log lines at the `error` level are written to stderr; all other levels are written to stdout. Under `node server.js`, stdout and stderr carry only these raw JSON lines (NDJSON); `npm start` and `npm run dev` also print npm's `> hello_world@1.0.0 …` script banner on stdout first, unless run with `--silent`.
+The application logs through Winston, one JSON object per line, with `level`, `message`, `timestamp`, and any request metadata as fields. Log lines at the `error` level are written to stderr; all other levels are written to stdout. Under `node server.js`, stdout and stderr carry only these raw JSON lines (NDJSON); `npm start` and `npm run dev` also print npm's `> hello_world@1.0.0 …` script banner on stdout first, unless run with `--silent`. If the reader of stdout or stderr goes away (`EPIPE`, for example when the output is piped into `head`), further output to that stream is discarded and the server keeps serving.
 
 HTTP access logs use morgan's `combined` format and are written through Winston at the `info` level. The logged URL, referrer, and user-agent are each cut at their first `?`, so no query string is logged (see D15 in [`docs/decision-log.md`](docs/decision-log.md)). Error log entries never include query strings, and entries for `4xx` errors never include request-body snippets (see D14 and D17).
 
@@ -141,7 +141,7 @@ Operational notes:
 
 - Network exposure: `--env production` (used by `npm run pm2:start`, `npm run pm2:reload` and the global `pm2 start ecosystem.config.js --env production`) binds `0.0.0.0:3000`, which listens on all IPv4 interfaces over plain HTTP. Restrict access to intended clients with a firewall or a reverse proxy, and terminate TLS at the reverse proxy or a load balancer.
 - `instances: 'max'` in `ecosystem.config.js` starts one worker per CPU core. Change `instances` in `ecosystem.config.js` to run a different number of workers (see D6 in [`docs/decision-log.md`](docs/decision-log.md)).
-- Graceful shutdown: on `SIGTERM` or `SIGINT` the server stops accepting new connections and lets open connections drain before exiting. If connections are still open after 4 seconds, the process is forced to exit. Before every exit the process waits up to 500 ms for pending log output to be written, so a forced exit completes within 4.5 seconds, below the PM2 `kill_timeout` of 5000 ms set in `ecosystem.config.js`.
+- Graceful shutdown: on `SIGTERM` or `SIGINT` the server stops accepting new connections and lets open connections drain before exiting. A keep-alive connection that is serving a request when the signal arrives is closed as soon as that response completes. If connections are still open after 4 seconds, the process is forced to exit. Before every exit the process waits up to 500 ms for pending log output to be written, so a forced exit completes within 4.5 seconds, below the PM2 `kill_timeout` of 5000 ms set in `ecosystem.config.js`.
 
 ## Testing
 

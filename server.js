@@ -35,6 +35,16 @@ const trackWrites = (stream) => {
 trackWrites(process.stdout);
 trackWrites(process.stderr);
 
+const onOutputError = (err) => {
+  if (err.code === 'EPIPE') {
+    return;
+  }
+  throw err;
+};
+
+process.stdout.on('error', onOutputError);
+process.stderr.on('error', onOutputError);
+
 let shuttingDown = false;
 let exiting = false;
 let shutdownTimer = null;
@@ -71,6 +81,18 @@ const onServerError = (err) => {
 };
 
 server.on('error', onServerError);
+
+const closeIdleConnections = () => server.closeIdleConnections();
+
+const onResponseFinish = () => {
+  if (shuttingDown && typeof server.closeIdleConnections === 'function') {
+    setImmediate(closeIdleConnections);
+  }
+};
+
+server.on('request', (req, res) => {
+  res.on('finish', onResponseFinish);
+});
 
 try {
   server.listen(config.PORT, config.HOST, () => {
