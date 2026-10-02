@@ -1,0 +1,9 @@
+# Dependencies
+node_modules/
+
+# Environment variables (local secrets)
+.env
+
+# Logs (winston / PM2 runtime output)
+logs/
+*.log
